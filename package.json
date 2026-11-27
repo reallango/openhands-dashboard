@@ -1,0 +1,13 @@
+{
+  "name": "openhands-dashboard",
+  "version": "0.1.0",
+  "description": "Small self-hosted dashboard for OpenHands Cloud conversations, with a cheap long-poll API for Claude.",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "start": "node src/server.js",
+    "hash-password": "node scripts/hash-password.js"
+  }
+}

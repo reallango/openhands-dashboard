@@ -1,0 +1,33 @@
+services:
+  openhands-dashboard:
+    build: .
+    image: openhands-dashboard:local
+    container_name: openhands-dashboard
+    restart: unless-stopped
+    environment:
+      # Set these in .env (or in the stack's environment in Bosun). See .env.example.
+      OPENHANDS_API_KEY: ${OPENHANDS_API_KEY:-}
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:-}
+      API_TOKEN: ${API_TOKEN:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      DEFAULT_REPO: ${DEFAULT_REPO:-}
+      DEFAULT_BRANCH: ${DEFAULT_BRANCH:-main}
+      ACTIVE_POLL_SEC: ${ACTIVE_POLL_SEC:-}
+      LIST_POLL_SEC: ${LIST_POLL_SEC:-}
+      IDLE_LIST_POLL_SEC: ${IDLE_LIST_POLL_SEC:-}
+      STALLED_MINUTES: ${STALLED_MINUTES:-}
+      RECENT_HOURS: ${RECENT_HOURS:-}
+      SESSION_DAYS: ${SESSION_DAYS:-}
+    ports:
+      - "${HOST_PORT:-3077}:3077"
+    volumes:
+      - data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+
+volumes:
+  data: {}

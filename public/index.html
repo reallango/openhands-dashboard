@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>OpenHands dashboard</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><img src="/icon.svg" alt="" width="22" height="22"> OpenHands dashboard</div>
+    <div id="poll-state" class="muted small"></div>
+    <div class="top-actions">
+      <button id="notify-btn" hidden>Enable notifications</button>
+      <button id="start-btn">New task</button>
+      <button id="logout-btn" class="ghost">Sign out</button>
+    </div>
+  </header>
+  <div id="toasts" aria-live="polite"></div>
+  <main class="layout">
+    <aside class="list-pane">
+      <div class="filters" role="tablist">
+        <button data-filter="active" class="on">Active <span id="count-active"></span></button>
+        <button data-filter="recent">Recent</button>
+        <button data-filter="all">All</button>
+      </div>
+      <input id="search" type="search" placeholder="Filter by title, repo, branch, PR">
+      <ul id="list" class="list"></ul>
+    </aside>
+    <section class="detail-pane" id="detail">
+      <div class="empty">Pick a conversation on the left.</div>
+    </section>
+  </main>
+
+  <dialog id="start-dialog">
+    <form id="start-form" method="dialog">
+      <h2>Start an OpenHands task</h2>
+      <p class="muted small">This spends OpenHands credits.</p>
+      <label>Repository <input name="repo" placeholder="owner/name" required pattern="[\w.\-]+/[\w.\-]+"></label>
+      <label>Branch <input name="branch" required></label>
+      <label>Title <input name="title" maxlength="200"></label>
+      <label>Brief <textarea name="brief" rows="12" required></textarea></label>
+      <p id="start-error" class="error"></p>
+      <div class="row-end">
+        <button type="button" id="start-cancel" class="ghost">Cancel</button>
+        <button type="submit" class="primary">Start</button>
+      </div>
+    </form>
+  </dialog>
+  <script src="/app.js"></script>
+</body>
+</html>
