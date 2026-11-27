@@ -1,6 +1,6 @@
 {
   "name": "openhands-dashboard",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Small self-hosted dashboard for OpenHands Cloud conversations, with a cheap long-poll API for Claude.",
   "private": true,
   "type": "module",

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { config, checkConfig } from './config.js';
 import { q } from './db.js';
 import { oh } from './openhands.js';
+import { createMcp } from './mcp.js';
 import { ACTIVE, ALERT, bus, health, startPoller, syncEvents, trackStartTask } from './poller.js';
 import {
   COOKIE, createSession, destroySession, getSession, loginBlockedFor, noteLoginFailure, noteLoginSuccess,
@@ -208,9 +209,12 @@ function describeChange(ch) {
   return `${v.id} ${ch.old || 'new'} -> ${ch.new} "${String(v.title).slice(0, 70)}"`;
 }
 
-// ---------- API handlers ----------
-function summary(req, res, url) {
-  const all = url.searchParams.get('all') === '1';
+// ---------- core operations (shared by the HTTP API and the MCP endpoint) ----------
+class UserError extends Error {
+  constructor(message, status = 400) { super(message); this.status = status; }
+}
+
+function summaryText({ all = false } = {}) {
   const cutoff = Date.now() - config.recentHours * 3_600_000;
   // Active tasks, outcomes (finished, error, ...) from the last RECENT_HOURS, and anything else touched in the last 2 hours.
   const quietCutoff = Date.now() - 2 * 3_600_000;
@@ -218,96 +222,124 @@ function summary(req, res, url) {
     || ((ms(v.last_activity) || 0) > cutoff && !['paused', 'idle', 'deleted'].includes(v.status))
     || (ms(v.last_activity) || 0) > quietCutoff);
   const cursor = q.maxChange.get().seq;
-  if (url.searchParams.get('format') === 'json') return send(res, 200, { cursor, items });
   const lines = items.map(line);
   const stale = health.lastErrorAt && (!health.lastOk || health.lastErrorAt > health.lastOk) ? `\nWARNING poller: ${health.lastError}` : '';
-  text(res, 200, `${lines.length ? lines.join('\n') : 'no active or recent tasks'}\ncursor=${cursor}${stale}`);
+  return { cursor, items, text: `${lines.length ? lines.join('\n') : 'no active or recent tasks'}\ncursor=${cursor}${stale}` };
 }
 
-function wait(req, res, url) {
-  const ids = (url.searchParams.get('ids') || '').split(',').map(s => s.trim()).filter(Boolean);
+// Resolves when one of the tasks reaches an alert state (or on timeout / abort).
+function waitFor({ ids = [], timeoutSec = 600, since } = {}, signal) {
   const refs = ids.map(resolveId);
-  const timeout = Math.min(Math.max(Number(url.searchParams.get('timeout')) || 600, 1), 1800) * 1000;
-  const sinceParam = url.searchParams.get('since');
-  const json = url.searchParams.get('format') === 'json';
-  const startCursor = q.maxChange.get().seq;
-  const since = sinceParam != null && sinceParam !== '' ? Number(sinceParam) || 0 : startCursor;
+  const timeout = Math.min(Math.max(Number(timeoutSec) || 600, 1), 1800) * 1000;
+  const hasSince = since != null && since !== '';
+  const from = hasSince ? Number(since) || 0 : q.maxChange.get().seq;
 
-  const reply = (reason, changes) => {
+  const result = (reason, changes) => {
     const cursor = q.maxChange.get().seq;
     const views = refs.map(viewFor);
-    if (json) return send(res, 200, { reason, cursor, changes: changes.map(describeChange), tasks: views });
-    const head = reason === 'timeout' ? 'timeout (no change)' : changes.length ? changes.map(c => `changed: ${describeChange(c)}`).join('\n') : `already ${reason}`;
-    text(res, 200, `${head}\ncursor=${cursor}${views.length ? `\n${views.map(line).join('\n')}` : ''}`);
+    const head = reason === 'timeout' ? 'timeout (no change)' : reason === 'aborted' ? 'aborted'
+      : changes.length ? changes.map(c => `changed: ${describeChange(c)}`).join('\n') : `already ${reason}`;
+    return { reason, cursor, changes: changes.map(describeChange), tasks: views, text: `${head}\ncursor=${cursor}${views.length ? `\n${views.map(line).join('\n')}` : ''}` };
   };
 
   // Without `since`, a task that is already in an alert state answers at once, so a wait never hangs on a finished task.
-  if (sinceParam == null || sinceParam === '') {
+  if (!hasSince && refs.length) {
     const done = refs.map(viewFor).filter(v => ALERT.has(v.status));
-    if (refs.length && done.length) return reply(done.map(v => v.status).join(','), []);
+    if (done.length) return Promise.resolve(result(done.map(v => v.status).join(','), []));
   }
-  const now = matchingChanges(refs, since);
-  if (now.length) return reply('changed', now);
+  const now = matchingChanges(refs, from);
+  if (now.length) return Promise.resolve(result('changed', now));
 
-  let finished = false;
-  const check = () => {
-    if (finished) return;
-    const ch = matchingChanges(refs, since);
-    if (ch.length) finish('changed', ch);
-  };
-  const finish = (reason, ch) => {
-    if (finished) return;
-    finished = true;
-    clearTimeout(timer);
-    bus.off('change', check);
-    reply(reason, ch);
-  };
-  const timer = setTimeout(() => finish('timeout', []), timeout);
-  bus.on('change', check);
-  req.on('close', () => { if (!finished) { finished = true; clearTimeout(timer); bus.off('change', check); } });
+  return new Promise(resolve => {
+    let finished = false;
+    const finish = (reason, ch) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      bus.off('change', check);
+      signal?.removeEventListener('abort', onAbort);
+      resolve(result(reason, ch));
+    };
+    const check = () => { const ch = matchingChanges(refs, from); if (ch.length) finish('changed', ch); };
+    const onAbort = () => finish('aborted', []);
+    const timer = setTimeout(() => finish('timeout', []), timeout);
+    bus.on('change', check);
+    signal?.addEventListener('abort', onAbort);
+  });
 }
 
 const lastOnDemand = new Map();
-async function events(req, res, url, id) {
+async function eventsData(rawId, { since, limit = 200, full = false } = {}) {
+  const id = resolveId(rawId)?.convId || rawId;
   const conv = q.getConv.get(id);
-  if (!conv) return fail(res, 404, 'Unknown conversation');
+  if (!conv) throw new UserError('Unknown conversation (a start task that is still setting up has no steps yet)', 404);
   // Conversations the poller is not following (old or finished) are filled in when someone looks at them.
   if (!conv.events_done && !ACTIVE.has(conv.status) && Date.now() - (lastOnDemand.get(id) || 0) > 15_000) {
     lastOnDemand.set(id, Date.now());
     try { await syncEvents(id, 30); } catch (e) { console.error(`[events] ${e.message}`); }
   }
-  const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 200, 1), 1000);
-  const sinceRaw = url.searchParams.get('since');
-  const rows = sinceRaw != null && sinceRaw !== '' ? q.eventsSince.all(id, Number(sinceRaw) || 0, limit) : q.eventsTail.all(id, limit);
-  const cursor = rows.length ? rows[rows.length - 1].seq : Number(sinceRaw) || 0;
-  if (url.searchParams.get('format') === 'json') return send(res, 200, { conversation: convView(q.getConv.get(id)), cursor, items: rows });
-  const full = url.searchParams.get('full') === '1';
+  const n = Math.min(Math.max(Number(limit) || 200, 1), 1000);
+  const hasSince = since != null && since !== '';
+  const rows = hasSince ? q.eventsSince.all(id, Number(since) || 0, n) : q.eventsTail.all(id, n);
+  const cursor = rows.length ? rows[rows.length - 1].seq : Number(since) || 0;
+  const view = convView(q.getConv.get(id));
   const out = rows.map(r => {
     const time = (r.ts || '').slice(11, 19);
     const body = r.body ? (full ? r.body : r.body.slice(0, 300).replace(/\s+/g, ' ')) : '';
     return `#${r.seq} ${time} ${r.is_error ? '!! ' : ''}${r.title}${body ? `\n    ${body}` : ''}`;
   });
-  text(res, 200, `${line(convView(q.getConv.get(id)))}\n${out.join('\n') || '(no steps yet)'}\ncursor=${cursor}`);
+  return { conversation: view, cursor, items: rows, text: `${line(view)}\n${out.join('\n') || '(no steps yet)'}\ncursor=${cursor}` };
+}
+
+async function startTask(body = {}) {
+  const repo = String(body.repo || body.repository || config.defaultRepo || '').trim();
+  const branch = String(body.branch || config.defaultBranch).trim();
+  const brief = String(body.brief || body.text || '').trim();
+  const title = body.title ? String(body.title).trim().slice(0, 200) : undefined;
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new UserError('repo must look like owner/name');
+  if (!/^[\w./-]{1,200}$/.test(branch)) throw new UserError('branch is not valid');
+  if (!brief || brief.length > 200_000) throw new UserError('brief is required (max 200000 characters)');
+  let task;
+  try { task = await oh.start({ repo, branch, brief, title }); } catch (e) { throw new UserError(e.message, 502); }
+  if (!task?.id) throw new UserError('OpenHands did not return a start task', 502);
+  trackStartTask(task, { repo, branch, title });
+  return { start_task_id: task.id, status: task.status, conversation_id: task.app_conversation_id ?? null, repo, branch };
+}
+
+// ---------- HTTP API handlers ----------
+const wantsJson = url => url.searchParams.get('format') === 'json';
+const sendErr = (res, e) => { if (e instanceof UserError) return fail(res, e.status, e.message); throw e; };
+
+function summary(req, res, url) {
+  const r = summaryText({ all: url.searchParams.get('all') === '1' });
+  return wantsJson(url) ? send(res, 200, { cursor: r.cursor, items: r.items }) : text(res, 200, r.text);
+}
+
+async function wait(req, res, url) {
+  const ac = new AbortController();
+  res.on('close', () => ac.abort());
+  const r = await waitFor({
+    ids: (url.searchParams.get('ids') || '').split(',').map(s => s.trim()).filter(Boolean),
+    timeoutSec: url.searchParams.get('timeout'),
+    since: url.searchParams.get('since'),
+  }, ac.signal);
+  if (r.reason === 'aborted' || res.destroyed) return;
+  const { text: body, ...json } = r;
+  return wantsJson(url) ? send(res, 200, json) : text(res, 200, body);
+}
+
+async function events(req, res, url, id) {
+  try {
+    const r = await eventsData(id, { since: url.searchParams.get('since'), limit: url.searchParams.get('limit'), full: url.searchParams.get('full') === '1' });
+    const { text: body, ...json } = r;
+    return wantsJson(url) ? send(res, 200, json) : text(res, 200, body);
+  } catch (e) { return sendErr(res, e); }
 }
 
 async function start(req, res) {
   let body;
   try { body = JSON.parse(await readBody(req)); } catch (e) { return fail(res, e.status || 400, e.status ? e.message : 'Body must be JSON'); }
-  const repo = String(body.repo || body.repository || config.defaultRepo || '').trim();
-  const branch = String(body.branch || config.defaultBranch).trim();
-  const brief = String(body.brief || body.text || '').trim();
-  const title = body.title ? String(body.title).trim().slice(0, 200) : undefined;
-  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return fail(res, 400, 'repo must look like owner/name');
-  if (!/^[\w./-]{1,200}$/.test(branch)) return fail(res, 400, 'branch is not valid');
-  if (!brief || brief.length > 200_000) return fail(res, 400, 'brief is required (max 200000 characters)');
-  try {
-    const task = await oh.start({ repo, branch, brief, title });
-    if (!task?.id) return fail(res, 502, 'OpenHands did not return a start task');
-    trackStartTask(task, { repo, branch, title });
-    send(res, 200, { start_task_id: task.id, status: task.status, conversation_id: task.app_conversation_id ?? null });
-  } catch (e) {
-    fail(res, 502, e.message);
-  }
+  try { send(res, 200, await startTask(body)); } catch (e) { return sendErr(res, e); }
 }
 
 async function login(req, res) {
@@ -336,6 +368,32 @@ async function login(req, res) {
   send(res, 200, { ok: true }, undefined, { 'Set-Cookie': sessionCookie(s.token, config.sessionDays * 86400) });
 }
 
+// ---------- MCP ----------
+const mcp = createMcp({
+  summary: summaryText,
+  wait: waitFor,
+  steps: eventsData,
+  start: startTask,
+});
+
+// The MCP endpoint takes only the API token (no browser session, so no CSRF exposure) and refuses cross-origin
+// browser requests (DNS rebinding protection, as the MCP specification asks).
+async function mcpEndpoint(req, res, who) {
+  if (!sameOrigin(req)) return fail(res, 403, 'Cross-origin request refused');
+  if (who?.kind !== 'token') {
+    return send(res, 401, { error: who?.kind === 'bad-token' ? 'Invalid API token' : 'Authorization: Bearer <API_TOKEN> required' }, undefined, { 'WWW-Authenticate': 'Bearer' });
+  }
+  if (req.method !== 'POST') return send(res, 405, { error: 'This MCP endpoint only takes POST (no server-sent event stream)' }, undefined, { Allow: 'POST' });
+  let raw;
+  try { raw = await readBody(req, 1024 * 1024); } catch (e) { return fail(res, e.status || 400, e.message); }
+  const ac = new AbortController();
+  res.on('close', () => ac.abort());
+  const { status, body } = await mcp.handlePost(raw, ac.signal);
+  if (res.destroyed) return;
+  if (!body) { res.writeHead(202, { ...SECURITY_HEADERS, 'Cache-Control': 'no-store' }); return res.end(); }
+  send(res, status, body);
+}
+
 // ---------- router ----------
 async function handle(req, res) {
   const url = new URL(req.url, 'http://local');
@@ -349,15 +407,18 @@ async function handle(req, res) {
     return send(res, 200, fs.readFileSync(path.join(PUBLIC, file)), type);
   }
   if (p === '/login' && method === 'POST') return login(req, res);
+  // No OAuth here: MCP clients that probe for it get a plain 404 instead of the login redirect.
+  if (p.startsWith('/.well-known/')) return fail(res, 404, 'Not found');
 
   const who = identify(req);
+  if (p === '/mcp') return mcpEndpoint(req, res, who);
   if (who?.kind === 'bad-token') return fail(res, 401, 'Invalid API token');
   if (!who) {
     if (p.startsWith('/api/')) return fail(res, 401, 'Login or API token required');
     res.writeHead(302, { ...SECURITY_HEADERS, Location: '/login', 'Cache-Control': 'no-store' });
     return res.end();
   }
-  if (who.kind === 'token' && !p.startsWith('/api/')) return fail(res, 403, 'The API token only works for /api/');
+  if (who.kind === 'token' && !p.startsWith('/api/')) return fail(res, 403, 'The API token only works for /api/ and /mcp');
 
   // Browser requests that change state need the session's CSRF token and a same-origin request.
   if (who.kind === 'session' && !['GET', 'HEAD'].includes(method)) {
