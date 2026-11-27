@@ -9,6 +9,7 @@ and gives Claude (or any script) a cheap way to wait for them instead of polling
 - **Web UI for the LAN.** A list of conversations (status, repository and branch, PR, last activity) and a live step view
   (messages, commands, file edits, output). Switching between conversations is one click. Alerts appear in the page
   with a sound, plus browser notifications where the browser allows them (see [Notifications](#notifications)).
+- **MCP server for Claude.** The same operations as MCP tools at `/mcp` (see [MCP server](#mcp-server)).
 - **API for Claude.** A one-line-per-task summary, a long-poll that returns when a task finishes, errors, gets stuck or
   opens a PR, and the step list of one conversation.
 - **Access control.** Web login (scrypt-hashed admin password from the environment), a separate bearer token for the API,
@@ -68,6 +69,47 @@ docker compose up -d --build
 ```sh
 OPENHANDS_API_KEY=... ADMIN_PASSWORD_HASH=... API_TOKEN=... DATA_DIR=./data node src/server.js
 ```
+
+## MCP server
+
+The dashboard is also an MCP server (Streamable HTTP) at `http://<host>:3077/mcp`, so Claude can use it as tools
+instead of writing HTTP calls. It takes the same `API_TOKEN` as the HTTP API, as a bearer header.
+
+| Tool | What it does |
+| --- | --- |
+| `list_tasks` | One line per active or recent task (`all: true` for every conversation). Same as `/api/summary`. |
+| `wait_for_tasks` | Blocks until one of `ids` finishes, errors, gets stuck or stalled, waits for input, or opens a PR, or until `timeout_sec` (default 600). Same as `/api/wait`, including `since`. |
+| `get_steps` | The steps of one conversation (`id`, optional `since`, `limit` default 50, `full`). |
+| `start_task` | Starts a conversation (`brief`, optional `repo`, `branch`, `title`). Spends credits. |
+
+Add it to Claude Code for your user (all projects):
+
+```sh
+claude mcp add --transport http --scope user openhands http://192.168.1.161:3077/mcp --header "Authorization: Bearer <API_TOKEN>"
+```
+
+Or put the token in an environment variable and reference it from `.mcp.json` or `~/.claude.json`
+(`${VAR}` is expanded in headers):
+
+```json
+{
+  "mcpServers": {
+    "openhands": {
+      "type": "http",
+      "url": "http://192.168.1.161:3077/mcp",
+      "headers": { "Authorization": "Bearer ${OPENHANDS_DASHBOARD_TOKEN}" }
+    }
+  }
+}
+```
+
+**Long waits.** Claude Code aborts an HTTP tool call that sends nothing for 5 minutes. When the client asks for
+progress (it sends a progress token and accepts an event stream), `wait_for_tasks` streams a progress notification
+every 25 seconds and can wait the full `timeout_sec`. Otherwise it waits at most 280 seconds; the reply then says so,
+and the next call passes the returned `cursor` as `since`.
+
+The endpoint answers with plain JSON (no event stream) and keeps no sessions. It refuses requests without the token,
+cross-origin browser requests, and anything but POST.
 
 ## API for Claude
 

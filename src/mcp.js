@@ -2,7 +2,7 @@
 // tools so Claude can use them without writing HTTP calls. Authentication (the API token) is checked by the router.
 
 const SUPPORTED_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
-const SERVER_INFO = { name: 'openhands-dashboard', title: 'OpenHands dashboard', version: '0.2.0' };
+const SERVER_INFO = { name: 'openhands-dashboard', title: 'OpenHands dashboard', version: '0.2.1' };
 
 const INSTRUCTIONS = `Tools for following OpenHands Cloud agent conversations through the owner's dashboard. Replies are short text.
 - list_tasks: one line per active or recent task (id, status, age, repo@branch, PR, title, latest step). Ends with cursor=N.
@@ -11,7 +11,9 @@ const INSTRUCTIONS = `Tools for following OpenHands Cloud agent conversations th
 - start_task: starts a new OpenHands conversation (spends credits); pass its start_task_id to wait_for_tasks.
 IDs can be conversation ids, start-task ids, or their first 8+ characters.`;
 
-const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+const SILENT_MAX_SEC = 280;
+
+const READ_ONLY ={ readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 
 export const TOOLS = [
   {
@@ -33,7 +35,7 @@ export const TOOLS = [
       type: 'object',
       properties: {
         ids: { type: 'array', items: { type: 'string' }, description: 'Conversation or start-task ids (or 8+ character prefixes). Empty: any task.' },
-        timeout_sec: { type: 'integer', minimum: 1, maximum: 1800, description: 'Give up after this many seconds (default 600).' },
+        timeout_sec: { type: 'integer', minimum: 1, maximum: 1800, description: 'Give up after this many seconds (default 600). Clients that send no progress token are limited to 280.' },
         since: { type: 'integer', minimum: 0, description: 'Cursor from a previous list_tasks or wait_for_tasks reply.' },
       },
       additionalProperties: false,
@@ -84,13 +86,29 @@ const textResult = (text, isError = false) => ({ content: [{ type: 'text', text 
 export function createMcp(ops) {
   const inflight = new Map(); // request id -> AbortController, for notifications/cancelled
 
-  async function callTool(name, args, signal) {
+  async function callTool(name, args, signal, ctx) {
     switch (name) {
       case 'list_tasks':
         return ops.summary({ all: !!args.all }).text;
       case 'wait_for_tasks': {
         const ids = Array.isArray(args.ids) ? args.ids.map(String) : typeof args.ids === 'string' ? args.ids.split(',') : [];
-        return (await ops.wait({ ids: ids.map(s => s.trim()).filter(Boolean), timeoutSec: args.timeout_sec ?? 600, since: args.since }, signal)).text;
+        let timeoutSec = Math.min(Math.max(Number(args.timeout_sec) || 600, 1), 1800);
+        // MCP clients abort a call that stays silent too long (Claude Code: 5 minutes over HTTP). With an event stream and a
+        // progress token we send progress every 25 s and can wait the full time; without, stay under that limit.
+        const stream = ctx.progressToken != null ? ctx.openStream?.() : null;
+        let capped = false;
+        if (!stream && timeoutSec > SILENT_MAX_SEC) { timeoutSec = SILENT_MAX_SEC; capped = true; }
+        const t0 = Date.now();
+        const timer = stream && setInterval(() => stream.send({
+          jsonrpc: '2.0', method: 'notifications/progress',
+          params: { progressToken: ctx.progressToken, progress: Math.round((Date.now() - t0) / 1000), total: timeoutSec, message: 'waiting for a task to change' },
+        }), 25_000);
+        try {
+          const r = await ops.wait({ ids: ids.map(s => s.trim()).filter(Boolean), timeoutSec, since: args.since }, signal);
+          return r.text + (capped && r.reason === 'timeout' ? `\n(waited ${SILENT_MAX_SEC}s, the most this client allows without progress; call again with since=${r.cursor})` : '');
+        } finally {
+          if (timer) clearInterval(timer);
+        }
       }
       case 'get_steps':
         if (!args.id) throw Object.assign(new Error('id is required'), { status: 400 });
@@ -104,7 +122,7 @@ export function createMcp(ops) {
     }
   }
 
-  async function handleMessage(msg, signal) {
+  async function handleMessage(msg, signal, ctx = {}) {
     if (!msg || msg.jsonrpc !== '2.0' || typeof msg.method !== 'string') {
       // A response from the client (we never send requests) or garbage.
       return msg && ('result' in msg || 'error' in msg) ? null : rpcError(msg?.id, -32600, 'Invalid request');
@@ -137,7 +155,8 @@ export function createMcp(ops) {
         signal?.addEventListener('abort', onAbort);
         inflight.set(msg.id, ac);
         try {
-          return ok(msg.id, textResult(await callTool(name, params.arguments || {}, ac.signal)));
+          const toolCtx = { progressToken: params._meta?.progressToken, openStream: ctx.openStream };
+          return ok(msg.id, textResult(await callTool(name, params.arguments || {}, ac.signal, toolCtx)));
         } catch (e) {
           if (!e.status) console.error(`[mcp] ${name}: ${e.message}`);
           return ok(msg.id, textResult(e.status ? e.message : `Internal error: ${e.message}`, true));
@@ -155,16 +174,20 @@ export function createMcp(ops) {
     }
   }
 
-  // Returns { status, body } for the HTTP layer. body null = 202 Accepted with no body.
-  async function handlePost(raw, signal) {
+  // Returns { status, body, stream } for the HTTP layer. body null = 202 Accepted with no body. stream is set when the
+  // reply was switched to an event stream (only for a single request, when the client accepts text/event-stream);
+  // the HTTP layer then sends body on that stream and closes it.
+  async function handlePost(raw, signal, { openStream } = {}) {
     let parsed;
     try { parsed = JSON.parse(raw); } catch { return { status: 400, body: rpcError(null, -32700, 'Parse error') }; }
     if (Array.isArray(parsed)) {
       const replies = (await Promise.all(parsed.map(m => handleMessage(m, signal)))).filter(Boolean);
       return replies.length ? { status: 200, body: replies } : { status: 202, body: null };
     }
-    const reply = await handleMessage(parsed, signal);
-    return reply ? { status: 200, body: reply } : { status: 202, body: null };
+    let stream = null;
+    const open = openStream && (() => (stream ||= openStream()));
+    const reply = await handleMessage(parsed, signal, { openStream: open });
+    return reply ? { status: 200, body: reply, stream } : { status: 202, body: null, stream };
   }
 
   return { handlePost };

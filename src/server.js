@@ -388,8 +388,14 @@ async function mcpEndpoint(req, res, who) {
   try { raw = await readBody(req, 1024 * 1024); } catch (e) { return fail(res, e.status || 400, e.message); }
   const ac = new AbortController();
   res.on('close', () => ac.abort());
-  const { status, body } = await mcp.handlePost(raw, ac.signal);
+  const sseOk = String(req.headers.accept || '').includes('text/event-stream');
+  const openStream = sseOk ? () => {
+    res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
+    return { send: obj => { if (!res.destroyed) res.write(`event: message\ndata: ${JSON.stringify(obj)}\n\n`); } };
+  } : undefined;
+  const { status, body, stream } = await mcp.handlePost(raw, ac.signal, { openStream });
   if (res.destroyed) return;
+  if (stream) { if (body) stream.send(body); return res.end(); }
   if (!body) { res.writeHead(202, { ...SECURITY_HEADERS, 'Cache-Control': 'no-store' }); return res.end(); }
   send(res, status, body);
 }
