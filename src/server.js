@@ -382,11 +382,13 @@ async function handle(req, res) {
     const alerts = since ? q.changesSince.all(since).filter(isAlertChange).map(ch => ({ seq: ch.seq, id: ch.task_id, text: describeChange(ch), what: ch.what, status: ch.new })) : [];
     return send(res, 200, { cursor, items: allTasks(), alerts, health });
   }
+  // A conversation id, a start-task id, or a prefix of 8+ characters of either.
+  const convIdOf = raw => { const r = resolveId(raw); return r?.convId || raw; };
   let m = p.match(/^\/api\/conversations\/([\w-]{8,64})\/events$/);
-  if (m && method === 'GET') return events(req, res, url, m[1]);
+  if (m && method === 'GET') return events(req, res, url, convIdOf(m[1]));
   m = p.match(/^\/api\/conversations\/([\w-]{8,64})$/);
   if (m && method === 'GET') {
-    const c = q.getConv.get(m[1]);
+    const c = q.getConv.get(convIdOf(m[1]));
     return c ? send(res, 200, convView(c)) : fail(res, 404, 'Unknown conversation');
   }
   if (method === 'POST' && p === '/api/start') return start(req, res);
