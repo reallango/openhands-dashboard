@@ -12,7 +12,8 @@ COPY src ./src
 COPY public ./public
 COPY scripts ./scripts
 
-RUN mkdir -p /data && chown node:node /data
+# The build context may come from a checkout made with umask 077 (Bosun does that): make the app readable, not writable.
+RUN chmod -R a+rX,go-w /app && mkdir -p /data && chown node:node /data
 USER node
 VOLUME ["/data"]
 EXPOSE 3077
