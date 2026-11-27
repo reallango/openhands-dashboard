@@ -68,10 +68,11 @@ function action(ev) {
       body = safeJson(a.data);
       break;
     default:
-      title = `${tool}${ev.summary ? `: ${firstLine(ev.summary)}` : ''}`;
+      // The summary often already starts with the tool name ("browser_navigate: {...}").
+      title = !ev.summary ? tool : ev.summary.startsWith(tool) ? firstLine(ev.summary) : `${tool}: ${firstLine(ev.summary)}`;
       body = safeJson(a);
   }
-  if (ev.summary && !['MCPToolAction'].includes(a.kind) && !title.includes(ev.summary)) title += `  · ${firstLine(ev.summary, 80)}`;
+  if (ev.summary && a.kind && !['MCPToolAction'].includes(a.kind) && !title.includes(firstLine(ev.summary))) title += `  · ${firstLine(ev.summary, 80)}`;
   return { tool, title, body: [thought && `💭 ${thought}`, cap(body, 6000)].filter(Boolean).join('\n\n'), is_error: 0 };
 }
 

@@ -52,7 +52,8 @@ Other settings are listed in [.env.example](.env.example).
 2. Deploy. Bosun builds the image from the repository and starts it. Data stays in the `data` volume across updates.
 3. Open `http://<host>:3077` and sign in.
 
-To update, redeploy the stack (Bosun pulls the new commit and rebuilds).
+To update, use the stack's **Update from source and redeploy** action: Bosun fetches the branch, rebuilds the image and
+restarts it with the stored environment. (Deploying the stack again does not rebuild an image that already exists.)
 
 ### With Docker Compose
 

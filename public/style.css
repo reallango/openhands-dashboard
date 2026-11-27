@@ -110,7 +110,7 @@ dialog textarea { font-family: var(--mono); font-size: 12.5px; }
 
 @media (max-width: 800px) {
   .top { padding: 8px 12px; gap: 8px; }
-  #poll-state { display: none; }
+  #poll-state, .brand-text, #notify-btn { display: none; }
   .layout { grid-template-columns: 1fr; }
   .layout.show-detail .list-pane { display: none; }
   .layout:not(.show-detail) .detail-pane { display: none; }

@@ -340,7 +340,7 @@ async function login(req, res) {
 async function handle(req, res) {
   const url = new URL(req.url, 'http://local');
   const p = url.pathname;
-  const method = req.method;
+  const method = req.method === 'HEAD' ? 'GET' : req.method; // Node leaves out the body of a HEAD reply
 
   if (p === '/healthz') return text(res, 200, 'ok');
 
@@ -354,7 +354,7 @@ async function handle(req, res) {
   if (who?.kind === 'bad-token') return fail(res, 401, 'Invalid API token');
   if (!who) {
     if (p.startsWith('/api/')) return fail(res, 401, 'Login or API token required');
-    res.writeHead(302, { Location: '/login', 'Cache-Control': 'no-store' });
+    res.writeHead(302, { ...SECURITY_HEADERS, Location: '/login', 'Cache-Control': 'no-store' });
     return res.end();
   }
   if (who.kind === 'token' && !p.startsWith('/api/')) return fail(res, 403, 'The API token only works for /api/');
