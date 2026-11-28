@@ -2,13 +2,14 @@
 // tools so Claude can use them without writing HTTP calls. Authentication (the API token) is checked by the router.
 
 const SUPPORTED_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
-const SERVER_INFO = { name: 'openhands-dashboard', title: 'OpenHands dashboard', version: '0.2.1' };
+const SERVER_INFO = { name: 'openhands-dashboard', title: 'OpenHands dashboard', version: '0.3.0' };
 
 const INSTRUCTIONS = `Tools for following OpenHands Cloud agent conversations through the owner's dashboard. Replies are short text.
 - list_tasks: one line per active or recent task (id, status, age, repo@branch, PR, title, latest step). Ends with cursor=N.
 - wait_for_tasks: blocks until a listed task finishes, errors, gets stuck or stalled, waits for input, or opens a PR (or the timeout passes). One call replaces repeated polling. To keep waiting after it returned, pass the cursor it returned as since.
 - get_steps: the steps of one conversation, when something looks wrong.
 - start_task: starts a new OpenHands conversation (spends credits); pass its start_task_id to wait_for_tasks.
+- send_message: sends a follow-up user message to an existing conversation (resumes it if paused), e.g. to ask it to commit, push and open the PR; then wait_for_tasks with the returned since.
 IDs can be conversation ids, start-task ids, or their first 8+ characters.`;
 
 const SILENT_MAX_SEC = 280;
@@ -76,13 +77,28 @@ export const TOOLS = [
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
+  {
+    name: 'send_message',
+    title: 'Send a message to a conversation',
+    description: 'Sends a follow-up user message to an existing conversation and starts the agent again (resuming a paused sandbox first). Use it to ask an agent to commit, push and open the PR after it stopped. Returns the conversation id and a cursor for wait_for_tasks.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Conversation id, start-task id, or an 8+ character prefix.' },
+        message: { type: 'string', description: 'The message to send to the agent.' },
+      },
+      required: ['id', 'message'],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  },
 ];
 
 const rpcError = (id, code, message) => ({ jsonrpc: '2.0', id: id ?? null, error: { code, message } });
 const ok = (id, result) => ({ jsonrpc: '2.0', id, result });
 const textResult = (text, isError = false) => ({ content: [{ type: 'text', text }], ...(isError ? { isError: true } : {}) });
 
-// ops: { summary({all}), wait({ids, timeoutSec, since}, signal), steps(id, {since, limit, full}), start(body) } -> { text }
+// ops: { summary({all}), wait({ids, timeoutSec, since}, signal), steps(id, {since, limit, full}), start(body), send(id, message) } -> { text }
 export function createMcp(ops) {
   const inflight = new Map(); // request id -> AbortController, for notifications/cancelled
 
@@ -116,6 +132,12 @@ export function createMcp(ops) {
       case 'start_task': {
         const r = await ops.start(args);
         return `started: start_task_id=${r.start_task_id} status=${r.status}${r.conversation_id ? ` conversation_id=${r.conversation_id}` : ''} on ${r.repo}@${r.branch}\nNext: wait_for_tasks with ids=["${r.start_task_id}"]`;
+      }
+      case 'send_message': {
+        if (!args.id) throw Object.assign(new Error('id is required'), { status: 400 });
+        if (args.message == null || args.message === '') throw Object.assign(new Error('message is required'), { status: 400 });
+        const r = await ops.send(String(args.id), String(args.message));
+        return `sent to ${r.conversation_id}${r.resumed ? ' (resumed the sandbox first)' : ''}\nNext: wait_for_tasks with ids=["${r.conversation_id}"] since=${r.cursor}`;
       }
       default:
         return null;

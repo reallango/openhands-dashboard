@@ -76,6 +76,35 @@ function renderList() {
 }
 
 // ---------- detail ----------
+function composer() {
+  const error = el('p', { class: 'error' });
+  const text = el('textarea', { rows: '2', maxlength: '200000', placeholder: 'Send a follow-up message to this conversation', 'aria-label': 'Follow-up message' });
+  const button = el('button', { type: 'submit', class: 'primary', text: 'Send' });
+  const form = el('form', { class: 'composer' }, text, error, el('div', { class: 'row-end' }, button));
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    const id = state.selected;
+    if (!id || !text.value.trim() || button.disabled) return;
+    error.textContent = '';
+    button.disabled = true;
+    try {
+      await api(`/api/conversations/${encodeURIComponent(id)}/messages`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: text.value }),
+      });
+      text.value = '';
+      await loadEvents(true);
+    } catch (err) {
+      error.textContent = err.message;
+    } finally {
+      button.disabled = false;
+    }
+  });
+  text.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); form.requestSubmit(); }
+  });
+  return form;
+}
+
 function renderHead() {
   const v = state.items.find(x => x.id === state.selected);
   const pane = $('#detail');
@@ -100,6 +129,7 @@ function renderHead() {
   if (oldHead && steps) { oldHead.replaceWith(head); return; }
   steps = el('div', { class: `steps${state.hideObs ? ' hide-obs' : ''}` });
   pane.replaceChildren(head, steps);
+  if (!v.id.startsWith('task:')) pane.append(composer());
 }
 
 function evNode(e) {
