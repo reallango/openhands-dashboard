@@ -7,7 +7,7 @@ import { config, checkConfig } from './config.js';
 import { q } from './db.js';
 import { oh } from './openhands.js';
 import { createMcp } from './mcp.js';
-import { ACTIVE, ALERT, bus, health, refreshSoon, startPoller, syncEvents, trackStartTask } from './poller.js';
+import { ACTIVE, ALERT, bus, health, noteMessageSent, startPoller, syncEvents, trackStartTask } from './poller.js';
 import {
   COOKIE, createSession, destroySession, getSession, loginBlockedFor, noteLoginFailure, noteLoginSuccess,
   parseCookies, safeEqual, sessionCookie, validHashFormat, verifyPassword,
@@ -315,7 +315,8 @@ async function sendMessage(rawId, text) {
   if (!msg.trim() || msg.length > 200_000) throw new UserError('text is required (max 200000 characters)');
   let r;
   try { r = await oh.sendMessage(id, msg); } catch (e) { throw new UserError(e.message, 502); }
-  refreshSoon(id);
+  // Recorded before the cursor is read, so wait_for_tasks(since=cursor) reports the agent finishing again.
+  noteMessageSent(id);
   return { conversation_id: r.conversation_id, resumed: !!r.resumed, cursor: q.maxChange.get().seq };
 }
 

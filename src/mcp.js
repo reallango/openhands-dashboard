@@ -2,7 +2,7 @@
 // tools so Claude can use them without writing HTTP calls. Authentication (the API token) is checked by the router.
 
 const SUPPORTED_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
-const SERVER_INFO = { name: 'openhands-dashboard', title: 'OpenHands dashboard', version: '0.3.0' };
+const SERVER_INFO = { name: 'openhands-dashboard', title: 'OpenHands dashboard', version: '0.3.1' };
 
 const INSTRUCTIONS = `Tools for following OpenHands Cloud agent conversations through the owner's dashboard. Replies are short text.
 - list_tasks: one line per active or recent task (id, status, age, repo@branch, PR, title, latest step). Ends with cursor=N.

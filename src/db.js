@@ -90,6 +90,7 @@ export const q = {
   eventCount: db.prepare('SELECT COUNT(*) AS n, MAX(ts) AS last FROM events WHERE conv_id = ?'),
   lastEvent: db.prepare("SELECT title, tool, ts FROM events WHERE conv_id = ? AND kind IN ('ActionEvent', 'MessageEvent') ORDER BY seq DESC LIMIT 1"),
   addChange: db.prepare('INSERT INTO changes (task_id, at, what, old, new) VALUES (?, ?, ?, ?, ?)'),
+  lastAgentEvent: db.prepare("SELECT MAX(ts) AS ts FROM events WHERE conv_id = ? AND source = 'agent'"),
   maxChange: db.prepare('SELECT COALESCE(MAX(seq), 0) AS seq FROM changes'),
   changesSince: db.prepare('SELECT * FROM changes WHERE seq > ? ORDER BY seq'),
   getSession: db.prepare('SELECT * FROM sessions WHERE id = ? AND expires_at > ?'),
