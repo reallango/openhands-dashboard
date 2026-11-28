@@ -140,7 +140,7 @@ function activeIds() {
 async function syncActive() {
   let changed = await syncStartTasks();
   // Conversations a start task just produced, plus everything still active.
-  const ids = new Set(activeIds());
+  const ids = new Set([...activeIds(), ...forceRefresh]);
   for (const t of q.allTasks.all()) if (t.conversation_id && !q.getConv.get(t.conversation_id)?.status) ids.add(t.conversation_id);
   for (const part of chunk([...ids], 25)) {
     for (const c of await oh.conversations(part)) {
@@ -148,6 +148,7 @@ async function syncActive() {
       changed ||= r.changed;
     }
   }
+  forceRefresh.clear();
   for (const id of ids) {
     try {
       await syncEvents(id);
@@ -190,7 +191,11 @@ function noteError(e) {
 let lastActive = 0;
 let lastList = 0;
 let running = false;
+const forceRefresh = new Set();
+
 export function kick() { lastActive = 0; }
+// Include this conversation in the next active sync even if its stored status is not active.
+export function refreshSoon(id) { forceRefresh.add(id); kick(); }
 
 async function tick() {
   if (running) return;

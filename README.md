@@ -11,7 +11,7 @@ and gives Claude (or any script) a cheap way to wait for them instead of polling
   with a sound, plus browser notifications where the browser allows them (see [Notifications](#notifications)).
 - **MCP server for Claude.** The same operations as MCP tools at `/mcp` (see [MCP server](#mcp-server)).
 - **API for Claude.** A one-line-per-task summary, a long-poll that returns when a task finishes, errors, gets stuck or
-  opens a PR, and the step list of one conversation.
+  opens a PR, the step list of one conversation, and a way to send a follow-up message to it.
 - **Access control.** Web login (scrypt-hashed admin password from the environment), a separate bearer token for the API,
   CSRF tokens plus same-origin checks on browser requests that change something, and login throttling.
 
@@ -81,6 +81,7 @@ instead of writing HTTP calls. It takes the same `API_TOKEN` as the HTTP API, as
 | `wait_for_tasks` | Blocks until one of `ids` finishes, errors, gets stuck or stalled, waits for input, or opens a PR, or until `timeout_sec` (default 600). Same as `/api/wait`, including `since`. |
 | `get_steps` | The steps of one conversation (`id`, optional `since`, `limit` default 50, `full`). |
 | `start_task` | Starts a conversation (`brief`, optional `repo`, `branch`, `title`). Spends credits. |
+| `send_message` | Sends a follow-up user message to an existing conversation (`id`, `message`), resuming a paused sandbox first. Returns the cursor to pass to `wait_for_tasks`. |
 
 Add it to Claude Code for your user (all projects):
 
@@ -155,6 +156,18 @@ Starts a conversation (this spends OpenHands credits). JSON body:
 `{ "repo": "owner/name", "branch": "dev", "title": "...", "brief": "..." }`. `repo` and `branch` default to
 `DEFAULT_REPO` and `DEFAULT_BRANCH`. Returns `{ "start_task_id": "...", "status": "WORKING", "conversation_id": null }`;
 pass the `start_task_id` to `/api/wait` right away.
+
+### `POST /api/conversations/<id>/messages`
+
+Sends a follow-up user message to an existing conversation and starts the agent again, for example to ask it to commit,
+push and open the PR after it errored. JSON body: `{ "text": "commit and push, open the PR" }`. A paused sandbox is
+resumed first; the call waits up to 90 seconds for it to run. Returns
+`{ "conversation_id": "...", "resumed": true, "cursor": 12 }`. Pass the `cursor` to `/api/wait` as `since` to wait for
+the next change. A start task with no conversation yet answers 409, and OpenHands errors answer 502.
+
+The message goes through the app server's `POST /app-conversations/<id>/send-message` proxy, which forwards it to the
+agent server's `POST /api/conversations/<id>/events`. Neither the OpenHands API key nor the sandbox session key is
+exposed to the browser or to API callers.
 
 ### Example (PowerShell)
 

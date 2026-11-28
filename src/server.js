@@ -7,7 +7,7 @@ import { config, checkConfig } from './config.js';
 import { q } from './db.js';
 import { oh } from './openhands.js';
 import { createMcp } from './mcp.js';
-import { ACTIVE, ALERT, bus, health, startPoller, syncEvents, trackStartTask } from './poller.js';
+import { ACTIVE, ALERT, bus, health, refreshSoon, startPoller, syncEvents, trackStartTask } from './poller.js';
 import {
   COOKIE, createSession, destroySession, getSession, loginBlockedFor, noteLoginFailure, noteLoginSuccess,
   parseCookies, safeEqual, sessionCookie, validHashFormat, verifyPassword,
@@ -306,6 +306,19 @@ async function startTask(body = {}) {
   return { start_task_id: task.id, status: task.status, conversation_id: task.app_conversation_id ?? null, repo, branch };
 }
 
+async function sendMessage(rawId, text) {
+  const ref = resolveId(rawId);
+  if (ref?.taskId && !ref.convId) throw new UserError('That start task has no conversation yet', 409);
+  const id = ref?.convId || ref?.unknown;
+  if (!id) throw new UserError('Unknown conversation', 404);
+  const msg = typeof text === 'string' ? text : '';
+  if (!msg.trim() || msg.length > 200_000) throw new UserError('text is required (max 200000 characters)');
+  let r;
+  try { r = await oh.sendMessage(id, msg); } catch (e) { throw new UserError(e.message, 502); }
+  refreshSoon(id);
+  return { conversation_id: r.conversation_id, resumed: !!r.resumed, cursor: q.maxChange.get().seq };
+}
+
 // ---------- HTTP API handlers ----------
 const wantsJson = url => url.searchParams.get('format') === 'json';
 const sendErr = (res, e) => { if (e instanceof UserError) return fail(res, e.status, e.message); throw e; };
@@ -342,6 +355,12 @@ async function start(req, res) {
   try { send(res, 200, await startTask(body)); } catch (e) { return sendErr(res, e); }
 }
 
+async function message(req, res, id) {
+  let body;
+  try { body = JSON.parse(await readBody(req, 1024 * 1024)); } catch (e) { return fail(res, e.status || 400, e.status ? e.message : 'Body must be JSON'); }
+  try { send(res, 200, await sendMessage(id, body?.text)); } catch (e) { return sendErr(res, e); }
+}
+
 async function login(req, res) {
   if (!sameOrigin(req)) return fail(res, 403, 'Cross-origin request refused');
   const ip = req.socket.remoteAddress || '?';
@@ -374,6 +393,7 @@ const mcp = createMcp({
   wait: waitFor,
   steps: eventsData,
   start: startTask,
+  send: sendMessage,
 });
 
 // The MCP endpoint takes only the API token (no browser session, so no CSRF exposure) and refuses cross-origin
@@ -453,6 +473,8 @@ async function handle(req, res) {
   const convIdOf = raw => { const r = resolveId(raw); return r?.convId || raw; };
   let m = p.match(/^\/api\/conversations\/([\w-]{8,64})\/events$/);
   if (m && method === 'GET') return events(req, res, url, convIdOf(m[1]));
+  m = p.match(/^\/api\/conversations\/([\w-]{8,64})\/messages$/);
+  if (m && method === 'POST') return message(req, res, m[1]);
   m = p.match(/^\/api\/conversations\/([\w-]{8,64})$/);
   if (m && method === 'GET') {
     const c = q.getConv.get(convIdOf(m[1]));

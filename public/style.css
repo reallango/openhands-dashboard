@@ -95,6 +95,11 @@ input:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--acc
 .hide-obs .ev.k-ObservationEvent:not(.err) { display: none; }
 .more { display: block; margin: 0 auto 10px; }
 
+/* follow-up message */
+.composer { border-top: 1px solid var(--line); background: var(--panel); padding: 10px 20px; display: grid; gap: 6px; }
+.composer textarea { resize: vertical; min-height: 54px; font-family: inherit; font-size: 13.5px; }
+.composer .error { margin: 0; }
+
 /* toasts and dialog */
 #toasts { position: fixed; top: 56px; right: 16px; display: grid; gap: 8px; z-index: 10; width: min(380px, calc(100vw - 32px)); }
 .toast { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 8px; padding: 10px 12px; box-shadow: 0 6px 20px rgba(0,0,0,.18); cursor: pointer; }
@@ -116,4 +121,5 @@ dialog textarea { font-family: var(--mono); font-size: 12.5px; }
   .layout:not(.show-detail) .detail-pane { display: none; }
   .back { display: inline-block; }
   .steps, .d-head { padding-left: 12px; padding-right: 12px; }
+  .composer { padding-left: 12px; padding-right: 12px; }
 }
