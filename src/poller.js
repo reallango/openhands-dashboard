@@ -47,8 +47,36 @@ function record(taskId, what, oldV, newV) {
   q.addChange.run(taskId, now(), what, oldV ?? null, newV ?? null);
 }
 
+// Follow-up messages sent through the dashboard: conversation id -> time sent. A short follow-up can run and finish
+// between two polls, so the poller would see "finished" before and after and record nothing. Sending marks the
+// conversation "running" at once, and until the agent has written an event after the message (or SEND_GRACE_MS
+// passes), a not-running status from OpenHands is taken as the state from before the message.
+const sentAt = new Map();
+const SEND_GRACE_MS = 3 * 60_000;
+const HOLD = new Set(['finished', 'waiting', 'idle', 'paused', 'setting up']);
+
+export function noteMessageSent(id) {
+  sentAt.set(id, now());
+  const old = q.getConv.get(id);
+  if (old && old.status !== 'running') {
+    record(id, 'status', old.status, 'running');
+    saveConv(id, { status: 'running' });
+    bus.emit('change');
+  }
+  refreshSoon(id);
+}
+
+function holdRunning(row, status) {
+  const t = sentAt.get(row.id);
+  if (!t) return status;
+  // 5 s of slack for clock differences between OpenHands and this host.
+  const agentAt = ms(q.lastAgentEvent.get(row.id)?.ts) || 0;
+  if (!HOLD.has(status) || agentAt > t - 5000 || now() - t > SEND_GRACE_MS) { sentAt.delete(row.id); return status; }
+  return 'running';
+}
+
 // Apply a conversation object from the OpenHands API to the store and record what changed.
-function applyConv(c, { quiet = false } = {}) {
+export function applyConv(c, { quiet = false } = {}) {
   const old = q.getConv.get(c.id);
   const prs = JSON.stringify((c.pr_number || []).map(Number).filter(Number.isFinite).sort((a, b) => a - b));
   const fields = {
@@ -67,7 +95,7 @@ function applyConv(c, { quiet = false } = {}) {
   };
   saveConv(c.id, fields);
   const row = q.getConv.get(c.id);
-  let status = deriveStatus(row);
+  let status = holdRunning(row, deriveStatus(row));
   // A finished sandbox is later paused by OpenHands and reports no execution status; keep the outcome.
   if (status === 'paused' && TERMINAL.has(old?.status)) status = old.status;
   saveConv(c.id, { status });
@@ -155,7 +183,7 @@ async function syncActive() {
       // Re-derive after events: "idle" becomes "waiting" once the agent has acted, "running" may go "stalled".
       const row = q.getConv.get(id);
       if (!row) continue;
-      let st = deriveStatus(row);
+      let st = holdRunning(row, deriveStatus(row));
       if (st === 'paused' && TERMINAL.has(row.status)) st = row.status;
       if (st !== row.status) { record(id, 'status', row.status, st); saveConv(id, { status: st }); changed = true; }
     } catch (e) { noteError(e); }
