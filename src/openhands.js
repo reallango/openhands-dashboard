@@ -4,14 +4,20 @@ import { config } from './config.js';
 
 const headers = () => ({ Authorization: `Bearer ${config.openhandsKey}`, Accept: 'application/json' });
 
-async function call(method, p, body) {
-  const res = await fetch(config.openhandsBase + p, {
-    method,
-    headers: body ? { ...headers(), 'Content-Type': 'application/json' } : headers(),
-    body: body ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(30_000),
-    redirect: 'error',
-  });
+async function call(method, p, body, { timeoutMs = 30_000 } = {}) {
+  let res;
+  try {
+    res = await fetch(config.openhandsBase + p, {
+      method,
+      headers: body ? { ...headers(), 'Content-Type': 'application/json' } : headers(),
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(timeoutMs),
+      redirect: 'error',
+    });
+  } catch (e) {
+    if (e.name !== 'TimeoutError') throw e;
+    throw Object.assign(new Error(`OpenHands ${method} ${p.split('?')[0]} timed out after ${timeoutMs / 1000} s`), { status: 504, timeout: true });
+  }
   const text = await res.text();
   if (!res.ok) {
     const err = new Error(`OpenHands ${method} ${p.split('?')[0]} -> HTTP ${res.status}: ${text.slice(0, 200)}`);
@@ -47,11 +53,19 @@ async function waitRunning(id, timeoutMs = 90_000) {
     if (!c) throw Object.assign(new Error(`Conversation ${id} not found`), { status: 404 });
     if (c.sandbox_status === 'RUNNING' && c.conversation_url) return c;
     if (c.sandbox_status === 'ERROR' || c.sandbox_status === 'MISSING') {
-      throw Object.assign(new Error(`Sandbox is ${c.sandbox_status}`), { status: c.sandbox_status === 'MISSING' ? 410 : 503 });
+      throw Object.assign(new Error(`The sandbox went to ${c.sandbox_status} while starting; the message was not sent`), { status: c.sandbox_status === 'MISSING' ? 410 : 503 });
     }
-    if (Date.now() >= end) throw Object.assign(new Error('timed out waiting for the sandbox to start'), { status: 504 });
+    if (Date.now() >= end) throw Object.assign(new Error(`The sandbox did not start within ${timeoutMs / 1000} s; the message was not sent`), { status: 504 });
     await sleep(2000);
   }
+}
+
+// Waking a paused sandbox can take well over the usual 30 s. If the request itself times out the sandbox may still be
+// coming up, so carry on and let waitRunning decide. Worst case resume + waitRunning + send stays under the 280 s an
+// MCP client without progress notifications allows.
+async function resume(sandboxId) {
+  try { await call('POST', `/sandboxes/${encodeURIComponent(sandboxId)}/resume`, undefined, { timeoutMs: 120_000 }); }
+  catch (e) { if (!e.timeout) throw e; }
 }
 
 async function sendDirect(conv, text) {
@@ -104,7 +118,7 @@ export const oh = {
     if (conv.sandbox_status !== 'RUNNING') {
       if (conv.sandbox_status === 'PAUSED') {
         if (!conv.sandbox_id) throw Object.assign(new Error('OpenHands did not return a sandbox id'), { status: 502 });
-        await call('POST', `/sandboxes/${encodeURIComponent(conv.sandbox_id)}/resume`);
+        await resume(conv.sandbox_id);
         resumed = true;
       }
       conv = await waitRunning(id);
@@ -117,7 +131,7 @@ export const oh = {
       if (e.status === 409 && !resumed) {
         // The sandbox went down between the check and the send: wake it and retry once.
         if (!conv.sandbox_id) throw e;
-        await call('POST', `/sandboxes/${encodeURIComponent(conv.sandbox_id)}/resume`);
+        await resume(conv.sandbox_id);
         resumed = true;
         conv = await waitRunning(id);
         await post();

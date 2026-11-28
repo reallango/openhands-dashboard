@@ -74,3 +74,35 @@ test('sendMessage refuses a non-https agent-server URL', async () => {
   await assert.rejects(oh.sendMessage(CONV, 'hello'), /non-https conversation URL/);
   assert.equal(calls.some(c => c.path === `/api/conversations/${CONV}/events`), false);
 });
+
+test('sendMessage carries on when the resume request times out but the sandbox comes up', async () => {
+  let gets = 0;
+  const calls = stub([
+    { method: 'GET', path: '/api/v1/app-conversations', reply: () => [gets++ === 0 ? conv({ sandbox_status: 'PAUSED' }) : conv()] },
+    { method: 'POST', path: `/api/v1/app-conversations/${CONV}/send-message`, reply: { success: true, sandbox_status: 'RUNNING' } },
+  ]);
+  const stubbed = globalThis.fetch;
+  globalThis.fetch = async (url, opts = {}) => {
+    if (new URL(String(url)).pathname === '/api/v1/sandboxes/sb1/resume') {
+      calls.push({ method: 'POST', path: '/api/v1/sandboxes/sb1/resume' });
+      throw new DOMException('The operation timed out.', 'TimeoutError');
+    }
+    return stubbed(url, opts);
+  };
+  assert.deepEqual(await oh.sendMessage(CONV, 'hello'), { conversation_id: CONV, resumed: true });
+  assert.equal(calls[calls.length - 1].path, `/api/v1/app-conversations/${CONV}/send-message`);
+});
+
+test('a timed-out request names the call', async () => {
+  globalThis.fetch = async () => { throw new DOMException('The operation timed out.', 'TimeoutError'); };
+  await assert.rejects(oh.sendMessage(CONV, 'hello'), /OpenHands GET \/app-conversations timed out after 30 s/);
+});
+
+test('a sandbox that fails while resuming says the message was not sent', async () => {
+  let gets = 0;
+  stub([
+    { method: 'GET', path: '/api/v1/app-conversations', reply: () => [gets++ === 0 ? conv({ sandbox_status: 'PAUSED' }) : conv({ sandbox_status: 'ERROR' })] },
+    { method: 'POST', path: '/api/v1/sandboxes/sb1/resume', reply: { success: true } },
+  ]);
+  await assert.rejects(oh.sendMessage(CONV, 'hello'), /went to ERROR while starting; the message was not sent/);
+});
